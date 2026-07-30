@@ -3,7 +3,7 @@ import cors from "cors";
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "20mb" }));
+app.use(express.json({ limit: "30mb" }));
 
 const MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const OPENAI_API_URL = "https://api.openai.com/v1/responses";
@@ -94,7 +94,7 @@ function mensajePublico(error) {
   }
   if (status === 403) return "La cuenta no tiene permiso para usar el modelo configurado.";
   if (status === 404) return `El modelo ${MODEL} no está disponible para esta cuenta.`;
-  if (status === 413) return "La imagen es demasiado grande.";
+  if (status === 413) return "El archivo es demasiado grande.";
   if (status === 429) return "Se alcanzó temporalmente el límite de uso de OpenAI o no hay cuota disponible.";
   if (status >= 500) return "OpenAI está temporalmente no disponible.";
   return "No se pudo procesar la receta.";
@@ -120,15 +120,48 @@ app.get("/api/health", (_req, res) => {
 
 app.post("/api/leer-receta", async (req, res) => {
   try {
-    const { imagen, mediaType = "image/jpeg" } = req.body || {};
+    const {
+      imagen,
+      mediaType = "image/jpeg",
+      nombreArchivo = mediaType === "application/pdf" ? "receta.pdf" : "receta.jpg",
+    } = req.body || {};
+
     if (!imagen || typeof imagen !== "string") {
-      return res.status(400).json({ error: "Falta la imagen." });
+      return res.status(400).json({ error: "Falta el archivo de la receta." });
     }
 
-    const tiposPermitidos = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+    const tiposPermitidos = new Set([
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+      "image/gif",
+      "application/pdf",
+    ]);
+
     if (!tiposPermitidos.has(mediaType)) {
-      return res.status(400).json({ error: "Formato no compatible. Usa JPG, PNG, WEBP o GIF." });
+      return res.status(400).json({
+        error: "Formato no compatible. Usa JPG, PNG, WEBP, GIF o PDF.",
+      });
     }
+
+    const esPdf = mediaType === "application/pdf";
+    const contenidoArchivo = esPdf
+      ? {
+          type: "input_file",
+          filename: nombreArchivo || "receta.pdf",
+          file_data: `data:application/pdf;base64,${imagen}`,
+        }
+      : {
+          type: "input_image",
+          image_url: `data:${mediaType};base64,${imagen}`,
+          detail: "high",
+        };
+
+    console.log(new Date().toISOString(), "POST /api/leer-receta", {
+      mediaType,
+      nombreArchivo,
+      longitudBase64: imagen.length,
+    });
 
     const respuestaApi = await fetch(OPENAI_API_URL, {
       method: "POST",
@@ -149,11 +182,7 @@ app.post("/api/leer-receta", async (req, res) => {
                 type: "input_text",
                 text: "Transcribe esta receta al JSON solicitado. Si una palabra no se distingue, indícalo en notas_generales y no inventes información.",
               },
-              {
-                type: "input_image",
-                image_url: `data:${mediaType};base64,${imagen}`,
-                detail: "high",
-              },
+              contenidoArchivo,
             ],
           },
         ],
