@@ -144,10 +144,11 @@ function mensajePublico(error) {
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
-    servicio: "plan-salud-server-openai-v8",
+    servicio: "plan-salud-server-openai-v9",
     modelo: MODEL,
     apiKeyConfigurada: Boolean(process.env.OPENAI_API_KEY),
     ocrMejorado: true,
+    detectorInteracciones: true,
   });
 });
 
@@ -275,9 +276,81 @@ app.post("/api/leer-receta", async (req, res) => {
   }
 });
 
+
+const ESQUEMA_INTERACCIONES = {
+  type: "object",
+  additionalProperties: false,
+  required: ["nivel_general", "resumen", "interacciones", "duplicidades", "advertencias"],
+  properties: {
+    nivel_general: { type: "string", enum: ["bajo", "moderado", "alto", "sin_datos"] },
+    resumen: { type: "string" },
+    interacciones: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["medicamentos", "nivel", "descripcion", "accion"],
+        properties: {
+          medicamentos: { type: "array", items: { type: "string" } },
+          nivel: { type: "string", enum: ["bajo", "moderado", "alto"] },
+          descripcion: { type: "string" },
+          accion: { type: "string" },
+        },
+      },
+    },
+    duplicidades: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["medicamentos", "descripcion"],
+        properties: {
+          medicamentos: { type: "array", items: { type: "string" } },
+          descripcion: { type: "string" },
+        },
+      },
+    },
+    advertencias: { type: "array", items: { type: "string" } },
+  },
+};
+
+app.post("/api/analizar-interacciones", async (req, res) => {
+  try {
+    const medicamentos = Array.isArray(req.body?.medicamentos) ? req.body.medicamentos : [];
+    if (medicamentos.length < 2) return res.status(400).json({ error: "Se necesitan al menos dos medicamentos." });
+    if (medicamentos.length > 30) return res.status(400).json({ error: "Demasiados medicamentos para una sola consulta." });
+
+    const respuestaApi = await fetch(OPENAI_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${getApiKey()}` },
+      body: JSON.stringify({
+        model: MODEL,
+        instructions: `Actúa como asistente de seguridad farmacológica. Compara únicamente los medicamentos proporcionados. Señala posibles interacciones, duplicidades terapéuticas o de principio activo y situaciones que merecen revisión profesional. No diagnostiques, no indiques suspender tratamientos y no inventes principios activos cuando el nombre comercial sea ambiguo. Si no puedes identificar con seguridad un medicamento, agrega una advertencia. Toda acción debe recomendar confirmación con médico o farmacéutico.`,
+        temperature: 0,
+        max_output_tokens: 1800,
+        text: { format: { type: "json_schema", name: "analisis_interacciones", strict: true, schema: ESQUEMA_INTERACCIONES } },
+        input: [{ role: "user", content: [{ type: "input_text", text: `Analiza esta lista:\n${JSON.stringify(medicamentos)}` }] }],
+      }),
+    });
+    const respuesta = await respuestaApi.json().catch(() => ({}));
+    if (!respuestaApi.ok) {
+      const error = new Error(respuesta?.error?.message || `OpenAI respondió HTTP ${respuestaApi.status}`);
+      error.status = respuestaApi.status;
+      throw error;
+    }
+    const texto = extraerTexto(respuesta);
+    if (!texto) throw new Error("OpenAI no devolvió el análisis.");
+    return res.json(JSON.parse(texto));
+  } catch (error) {
+    const status = Number(error?.status || 500);
+    console.error("ERROR EN INTERACCIONES:", error?.message);
+    return res.status(status >= 400 && status <= 599 ? status : 500).json({ error: mensajePublico(error) });
+  }
+});
+
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor OpenAI V8 ejecutándose en el puerto ${PORT}`);
+  console.log(`Servidor OpenAI V9 ejecutándose en el puerto ${PORT}`);
   console.log(`Modelo configurado: ${MODEL}`);
   console.log(`OPENAI_API_KEY configurada: ${Boolean(process.env.OPENAI_API_KEY)}`);
 });
