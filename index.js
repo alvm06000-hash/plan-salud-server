@@ -363,47 +363,156 @@ function textoLimpio(valor) {
   return typeof valor === "string" ? valor.trim() : "";
 }
 
+function normalizarNombreAdministrativo(valor = "") {
+  return textoLimpio(valor)
+    .replace(/^departamento de\s+/i, "")
+    .replace(/^provincia de\s+/i, "")
+    .replace(/^región de\s+/i, "")
+    .trim();
+}
+
+function primerTexto(...valores) {
+  for (const valor of valores) {
+    const limpio = textoLimpio(valor);
+    if (limpio) return limpio;
+  }
+  return "";
+}
+
 function normalizarUbicacionNominatim(payload = {}) {
   const a = payload.address || {};
   const country = textoLimpio(a.country);
   const countryCode = textoLimpio(a.country_code).toLowerCase();
+  const displayName = textoLimpio(payload.display_name);
 
-  let department =
-    textoLimpio(a.state) ||
-    textoLimpio(a.region) ||
-    textoLimpio(a.state_district);
+  /*
+   * Nominatim no siempre usa los mismos nombres de campos para las divisiones
+   * administrativas. Por eso se prueban varias alternativas.
+   */
+  let department = primerTexto(
+    a.state,
+    a.region,
+    a.state_district,
+    a["ISO3166-2-lvl4_name"],
+  );
 
-  let province =
-    textoLimpio(a.province) ||
-    textoLimpio(a.county) ||
-    textoLimpio(a.municipality) ||
-    textoLimpio(a.city);
+  let province = primerTexto(
+    a.province,
+    a.county,
+    a.state_district,
+    a.municipality,
+    a.city,
+  );
 
-  let district =
-    textoLimpio(a.city_district) ||
-    textoLimpio(a.district) ||
-    textoLimpio(a.borough) ||
-    textoLimpio(a.suburb) ||
-    textoLimpio(a.town) ||
-    textoLimpio(a.village) ||
-    textoLimpio(a.municipality) ||
-    textoLimpio(a.city);
+  let district = primerTexto(
+    a.city_district,
+    a.district,
+    a.borough,
+    a.suburb,
+    a.town,
+    a.village,
+    a.municipality,
+    a.city,
+  );
 
-  // Ajuste útil para Lima Metropolitana.
+  department = normalizarNombreAdministrativo(department);
+  province = normalizarNombreAdministrativo(province);
+  district = normalizarNombreAdministrativo(district);
+
+  // Reglas específicas para Perú, donde Lima Metropolitana puede venir
+  // etiquetada de varias formas según el objeto de OpenStreetMap encontrado.
   if (countryCode === "pe") {
-    const depLower = department.toLowerCase();
-    const provLower = province.toLowerCase();
+    const todosLosValores = Object.values(a)
+      .filter((valor) => typeof valor === "string")
+      .join(" | ");
 
-    if (
-      depLower.includes("provincia de lima") ||
-      depLower === "lima" ||
-      provLower.includes("provincia de lima")
-    ) {
-      department = "Lima";
-      province = "Lima";
+    const textoCompleto = `${todosLosValores} | ${displayName}`.toLowerCase();
+
+    const departamentosPeru = [
+      "Amazonas",
+      "Áncash",
+      "Apurímac",
+      "Arequipa",
+      "Ayacucho",
+      "Cajamarca",
+      "Callao",
+      "Cusco",
+      "Huancavelica",
+      "Huánuco",
+      "Ica",
+      "Junín",
+      "La Libertad",
+      "Lambayeque",
+      "Lima",
+      "Loreto",
+      "Madre de Dios",
+      "Moquegua",
+      "Pasco",
+      "Piura",
+      "Puno",
+      "San Martín",
+      "Tacna",
+      "Tumbes",
+      "Ucayali",
+    ];
+
+    // Si Nominatim no envía state/region, inferimos el departamento únicamente
+    // a partir de nombres administrativos que sí aparecen en la respuesta.
+    if (!department) {
+      const encontrado = departamentosPeru.find((nombre) =>
+        textoCompleto.includes(nombre.toLowerCase()),
+      );
+      if (encontrado) department = encontrado;
     }
 
-    if (!province && department === "Lima") province = "Lima";
+    const depLower = department.toLowerCase();
+    const provLower = province.toLowerCase();
+    const cityLower = textoLimpio(a.city).toLowerCase();
+    const countyLower = textoLimpio(a.county).toLowerCase();
+    const stateDistrictLower = textoLimpio(a.state_district).toLowerCase();
+
+    const esLimaMetropolitana =
+      depLower.includes("lima metropolitana") ||
+      provLower.includes("lima metropolitana") ||
+      countyLower.includes("lima metropolitana") ||
+      stateDistrictLower.includes("lima metropolitana") ||
+      textoCompleto.includes("provincia de lima") ||
+      cityLower === "lima";
+
+    if (esLimaMetropolitana) {
+      department = "Lima";
+      province = "Lima";
+    } else {
+      // Limpia formatos como "Provincia de Arequipa".
+      province = normalizarNombreAdministrativo(province);
+
+      // En provincias fuera de Lima, county/province suele ser la mejor fuente.
+      if (!province) {
+        province = normalizarNombreAdministrativo(
+          primerTexto(a.county, a.province, a.municipality, a.city),
+        );
+      }
+
+      // Último respaldo para departamento si vino vacío pero la provincia o
+      // display_name contienen un nombre departamental conocido.
+      if (!department) {
+        const encontrado = departamentosPeru.find((nombre) =>
+          textoCompleto.includes(nombre.toLowerCase()),
+        );
+        if (encontrado) department = encontrado;
+      }
+    }
+
+    // Callao es departamento/provincia constitucional.
+    if (
+      textoCompleto.includes("callao") &&
+      (department.toLowerCase() === "callao" || !department)
+    ) {
+      department = "Callao";
+      if (!province || province.toLowerCase().includes("callao")) {
+        province = "Callao";
+      }
+    }
   }
 
   return {
@@ -412,7 +521,7 @@ function normalizarUbicacionNominatim(payload = {}) {
     department,
     province,
     district,
-    display_name: textoLimpio(payload.display_name),
+    display_name: displayName,
   };
 }
 
