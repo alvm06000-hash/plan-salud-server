@@ -348,6 +348,138 @@ app.post("/api/analizar-interacciones", async (req, res) => {
   }
 });
 
+
+// ===== V14.2: geocodificación inversa para Perfil de Salud =====
+// Nominatim público: uso bajo demanda del usuario, con caché y límite global >= 1 s.
+const reverseGeocodeCache = new Map();
+let ultimaConsultaNominatim = 0;
+let colaNominatim = Promise.resolve();
+
+function esperar(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function textoLimpio(valor) {
+  return typeof valor === "string" ? valor.trim() : "";
+}
+
+function normalizarUbicacionNominatim(payload = {}) {
+  const a = payload.address || {};
+  const country = textoLimpio(a.country);
+  const countryCode = textoLimpio(a.country_code).toLowerCase();
+
+  let department =
+    textoLimpio(a.state) ||
+    textoLimpio(a.region) ||
+    textoLimpio(a.state_district);
+
+  let province =
+    textoLimpio(a.province) ||
+    textoLimpio(a.county) ||
+    textoLimpio(a.municipality) ||
+    textoLimpio(a.city);
+
+  let district =
+    textoLimpio(a.city_district) ||
+    textoLimpio(a.district) ||
+    textoLimpio(a.borough) ||
+    textoLimpio(a.suburb) ||
+    textoLimpio(a.town) ||
+    textoLimpio(a.village) ||
+    textoLimpio(a.municipality) ||
+    textoLimpio(a.city);
+
+  // Ajuste útil para Lima Metropolitana.
+  if (countryCode === "pe") {
+    const depLower = department.toLowerCase();
+    const provLower = province.toLowerCase();
+
+    if (
+      depLower.includes("provincia de lima") ||
+      depLower === "lima" ||
+      provLower.includes("provincia de lima")
+    ) {
+      department = "Lima";
+      province = "Lima";
+    }
+
+    if (!province && department === "Lima") province = "Lima";
+  }
+
+  return {
+    country,
+    country_code: countryCode,
+    department,
+    province,
+    district,
+    display_name: textoLimpio(payload.display_name),
+  };
+}
+
+app.get("/api/reverse-geocode", async (req, res) => {
+  try {
+    const lat = Number(req.query?.lat);
+    const lon = Number(req.query?.lon);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return res.status(400).json({ error: "Latitud o longitud inválida." });
+    }
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      return res.status(400).json({ error: "Coordenadas fuera de rango." });
+    }
+
+    // Redondeo solo para la clave de caché; no altera la consulta del usuario.
+    const cacheKey = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+    const guardado = reverseGeocodeCache.get(cacheKey);
+    if (guardado && Date.now() - guardado.ts < 24 * 60 * 60 * 1000) {
+      return res.json({ ...guardado.data, cached: true });
+    }
+
+    let resultado;
+    await (colaNominatim = colaNominatim.then(async () => {
+      const espera = Math.max(0, 1100 - (Date.now() - ultimaConsultaNominatim));
+      if (espera) await esperar(espera);
+
+      const url =
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2` +
+        `&addressdetails=1&layer=address&zoom=16` +
+        `&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`;
+
+      const respuesta = await fetch(url, {
+        headers: {
+          "User-Agent": "PlanSalud/14.2 (contacto: alvm06000@gmail.com)",
+          "Accept-Language": "es",
+          Accept: "application/json",
+        },
+      });
+
+      ultimaConsultaNominatim = Date.now();
+
+      const payload = await respuesta.json().catch(() => ({}));
+      if (!respuesta.ok) {
+        const error = new Error(`Servicio de ubicación respondió HTTP ${respuesta.status}`);
+        error.status = respuesta.status;
+        throw error;
+      }
+
+      resultado = normalizarUbicacionNominatim(payload);
+      reverseGeocodeCache.set(cacheKey, { ts: Date.now(), data: resultado });
+    }));
+
+    return res.json({
+      ...resultado,
+      source: "OpenStreetMap Nominatim",
+      attribution: "© OpenStreetMap contributors",
+      cached: false,
+    });
+  } catch (error) {
+    console.error("ERROR EN REVERSE GEOCODE:", error?.message);
+    return res.status(502).json({
+      error: "No se pudo identificar automáticamente la ubicación. Puedes completarla manualmente.",
+    });
+  }
+});
+
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Servidor OpenAI V9 ejecutándose en el puerto ${PORT}`);
